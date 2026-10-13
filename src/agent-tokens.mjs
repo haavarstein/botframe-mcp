@@ -16,21 +16,38 @@ export function hashesEqual(a, b) {
   return timingSafeEqual(left, right);
 }
 
-export function sourceTokensFromFile(file) {
-  if (!file) return {};
+// Fail-closed parse. ok is true only when the file exists and has at least one
+// valid source hash. Callers that treat a missing default file as optional must
+// check presence themselves; never treat !ok as "use the legacy token".
+export function loadSourceTokens(file) {
+  if (!file) return { ok: false, tokens: {}, reason: 'missing' };
+  let text;
   try {
-    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
-    const out = {};
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { ok: false, tokens: {}, reason: 'missing' };
+    return { ok: false, tokens: {}, reason: 'unreadable' };
+  }
+  try {
+    const data = JSON.parse(text);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return { ok: false, tokens: {}, reason: 'malformed' };
+    }
+    const tokens = {};
     Object.keys(data).forEach((source) => {
       const id = String(source).toLowerCase();
       const hash = String(data[source] || '').toLowerCase();
-      if (SOURCE_RE.test(id) && HASH_RE.test(hash)) out[id] = hash;
+      if (SOURCE_RE.test(id) && HASH_RE.test(hash)) tokens[id] = hash;
     });
-    return out;
+    if (!Object.keys(tokens).length) return { ok: false, tokens: {}, reason: 'empty' };
+    return { ok: true, tokens };
   } catch {
-    return {};
+    return { ok: false, tokens: {}, reason: 'malformed' };
   }
+}
+
+export function sourceTokensFromFile(file) {
+  return loadSourceTokens(file).tokens;
 }
 
 // Returns { ok, source } on success. source is the bound id for a per-source

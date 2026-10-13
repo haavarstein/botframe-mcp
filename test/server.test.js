@@ -7,7 +7,7 @@ import test from 'node:test';
 import { hashToken } from '../src/agent-tokens.mjs';
 import { AlertBoard } from '../src/alerts.mjs';
 import { RateLimiter } from '../src/guard.mjs';
-import { createServer, listen, validateStartup } from '../src/server.mjs';
+import { createServer, isLoopbackHost, listen, TOKENS_FILE_ERROR, validateStartup } from '../src/server.mjs';
 import { AgentWall } from '../src/status.mjs';
 
 const TOKEN = '0123456789abcdef';
@@ -245,6 +245,241 @@ test('agent events and wall are available over HTTP', async () => {
     const wall = await fetch('http://127.0.0.1:' + port + '/api/agents/wall').then((res) => res.json());
     assert.equal(wall.working[0].id, 'coder');
   } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+function writeTokensFile(dir, body) {
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'agent-tokens.json');
+  fs.writeFileSync(file, body, { mode: 0o600 });
+  if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
+  return file;
+}
+
+test('validateStartup refuses a tokens file that is malformed or has no valid hashes', () => {
+  const dir = tmpDir();
+  const empty = writeTokensFile(dir, '{}\n');
+  assert.throws(() => validateStartup({ tokensFile: empty, envFile: '', legacyToken: TOKEN }), new RegExp(TOKENS_FILE_ERROR));
+  const malformed = writeTokensFile(dir, '{');
+  assert.throws(() => validateStartup({ tokensFile: malformed, envFile: '', legacyToken: TOKEN }), new RegExp(TOKENS_FILE_ERROR));
+  const noneValid = writeTokensFile(dir, JSON.stringify({ 'Bad Source': hashToken(AGENT) }) + '\n');
+  assert.throws(() => validateStartup({ tokensFile: noneValid, envFile: '', legacyToken: '' }), new RegExp(TOKENS_FILE_ERROR));
+});
+
+test('validateStartup refuses a configured tokens path that is missing', () => {
+  const missing = path.join(tmpDir(), 'missing.json');
+  assert.throws(
+    () => validateStartup({ tokensFile: missing, tokensFileConfigured: true, envFile: '', legacyToken: TOKEN }),
+    new RegExp(TOKENS_FILE_ERROR),
+  );
+});
+
+test('listen refuses when the default tokens file exists but is empty', async () => {
+  const dir = tmpDir();
+  writeTokensFile(path.join(dir, 'config'), '{}\n');
+  const prev = process.env.AGENT_SOURCE_TOKENS_FILE;
+  delete process.env.AGENT_SOURCE_TOKENS_FILE;
+  try {
+    await assert.rejects(
+      () => listen({
+        cwd: dir,
+        envFile: '',
+        port: 0,
+        token: TOKEN,
+        frameToken: FRAME,
+        alerts: new AlertBoard({ file: '', quiet: null }),
+        agentWall: new AgentWall({ file: '' }),
+      }),
+      new RegExp(TOKENS_FILE_ERROR),
+    );
+  } finally {
+    if (prev == null) delete process.env.AGENT_SOURCE_TOKENS_FILE;
+    else process.env.AGENT_SOURCE_TOKENS_FILE = prev;
+  }
+});
+
+test('a broken tokens file refuses all agent auth and never falls back to the legacy token', async () => {
+  const file = writeTokensFile(tmpDir(), JSON.stringify({ ops: hashToken(AGENT) }) + '\n');
+  const ctx = board();
+  const errors = [];
+  const orig = console.error;
+  console.error = (...args) => {
+    errors.push(args.map(String).join(' '));
+    orig.apply(console, args);
+  };
+  const server = createServer({
+    token: TOKEN,
+    frameToken: FRAME,
+    tokensFile: file,
+    alerts: ctx.alerts,
+    agentWall: ctx.agentWall,
+    now: ctx.now,
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    const ok = await post(port, '/api/alerts', { text: 'hello', source: 'ops' }, AGENT);
+    assert.equal(ok.status, 200);
+    fs.writeFileSync(file, '{not json', { mode: 0o600 });
+    if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
+    const withLegacy = await post(port, '/api/alerts', { text: 'hello', source: 'ops' }, TOKEN);
+    assert.equal(withLegacy.status, 401);
+    const withAgent = await post(port, '/api/alerts', { text: 'hello', source: 'ops' }, AGENT);
+    assert.equal(withAgent.status, 401);
+    const status = await post(port, '/api/agents/events', { agent: 'ops', kind: 'running', line: 'working' }, TOKEN);
+    assert.equal(status.status, 401);
+    const mcp = await post(port, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, TOKEN);
+    assert.equal(mcp.status, 401);
+    const ours = errors.filter((line) => line.includes(TOKENS_FILE_ERROR));
+    assert.ok(ours.length);
+    for (const line of ours) {
+      assert.equal(line.includes('?'), false);
+      assert.equal(line.includes('/api/'), false);
+      assert.equal(line.includes(TOKEN), false);
+      assert.equal(line.includes(AGENT), false);
+    }
+  } finally {
+    console.error = orig;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('an empty tokens file at runtime does not fall back to the legacy token', async () => {
+  const file = path.join(tmpDir(), 'agent-tokens.json');
+  const ctx = board();
+  const errors = [];
+  const orig = console.error;
+  console.error = (...args) => {
+    errors.push(args.map(String).join(' '));
+    orig.apply(console, args);
+  };
+  const server = createServer({
+    token: TOKEN,
+    frameToken: FRAME,
+    tokensFile: file,
+    alerts: ctx.alerts,
+    agentWall: ctx.agentWall,
+    now: ctx.now,
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    const before = await post(port, '/api/alerts', { text: 'hello', source: 'coder' }, TOKEN);
+    assert.equal(before.status, 200);
+    fs.writeFileSync(file, '{}\n', { mode: 0o600 });
+    if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
+    const after = await post(port, '/api/alerts', { text: 'hello', source: 'coder' }, TOKEN);
+    assert.equal(after.status, 401);
+    assert.ok(errors.some((line) => line.includes(TOKENS_FILE_ERROR)));
+  } finally {
+    console.error = orig;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('the frame token can dismiss and cannot post or set status', async () => {
+  const { server, port } = await start();
+  try {
+    const shown = await post(port, '/api/alerts', { text: 'tap me', source: 'coder' }, TOKEN);
+    assert.equal(shown.status, 200);
+    const id = JSON.parse(shown.text).id;
+    const posted = await post(port, '/api/alerts', { text: 'from frame', source: 'coder' }, FRAME);
+    assert.equal(posted.status, 401);
+    const status = await post(port, '/api/agents/events', { agent: 'coder', kind: 'running', line: 'working' }, FRAME);
+    assert.equal(status.status, 401);
+    const mcp = await post(port, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, FRAME);
+    assert.equal(mcp.status, 401);
+    const gone = await post(port, '/api/alerts/dismiss', { id }, FRAME);
+    assert.equal(gone.status, 204);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('the frame page reads token from the query and strips it with replaceState', async () => {
+  const { server, port } = await start();
+  try {
+    const html = await fetch('http://127.0.0.1:' + port + '/').then((res) => res.text());
+    assert.match(html, /params\.get\('token'\)/);
+    assert.match(html, /params\.delete\('token'\)/);
+    assert.match(html, /history\.replaceState/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('isLoopbackHost accepts loopback addresses only', () => {
+  assert.equal(isLoopbackHost('127.0.0.1'), true);
+  assert.equal(isLoopbackHost('127.255.255.255'), true);
+  assert.equal(isLoopbackHost('::1'), true);
+  assert.equal(isLoopbackHost('[::1]'), true);
+  assert.equal(isLoopbackHost('localhost'), true);
+  assert.equal(isLoopbackHost('LOCALHOST'), true);
+  assert.equal(isLoopbackHost('0.0.0.0'), false);
+  assert.equal(isLoopbackHost('::'), false);
+});
+
+test('listen warns when HOST is not loopback', async () => {
+  const dir = tmpDir();
+  const warnings = [];
+  const orig = console.warn;
+  console.warn = (...args) => {
+    warnings.push(args.map(String).join(' '));
+    orig.apply(console, args);
+  };
+  const server = await listen({
+    cwd: dir,
+    envFile: '',
+    tokensFile: '',
+    host: '0.0.0.0',
+    port: 0,
+    token: TOKEN,
+    frameToken: FRAME,
+    alerts: new AlertBoard({ file: '', quiet: null }),
+    agentWall: new AgentWall({ file: '' }),
+  });
+  try {
+    assert.ok(warnings.some((line) => /loopback/.test(line)));
+    for (const line of warnings) {
+      assert.equal(line.includes('?'), false);
+      assert.equal(line.includes('/api/'), false);
+    }
+  } finally {
+    console.warn = orig;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('deleting a tokens file that existed at startup revokes all agent auth', async () => {
+  const file = path.join(tmpDir(), 'agent-tokens.json');
+  const agentToken = 'a'.repeat(48);
+  fs.writeFileSync(file, JSON.stringify({ coder: hashToken(agentToken) }) + '\n', { mode: 0o600 });
+  if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
+  const ctx = board();
+  const orig = console.error;
+  console.error = () => {};
+  const server = createServer({
+    token: TOKEN,
+    frameToken: FRAME,
+    tokensFile: file,
+    sourceTokens: { coder: hashToken(agentToken) },
+    alerts: ctx.alerts,
+    agentWall: ctx.agentWall,
+    now: ctx.now,
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    const before = await post(port, '/api/alerts', { text: 'hello', source: 'coder' }, agentToken);
+    assert.equal(before.status, 200);
+    fs.unlinkSync(file);
+    const after = await post(port, '/api/alerts', { text: 'hello', source: 'coder' }, agentToken);
+    assert.equal(after.status, 401);
+    const legacy = await post(port, '/api/alerts', { text: 'hello', source: 'coder' }, TOKEN);
+    assert.equal(legacy.status, 401);
+  } finally {
+    console.error = orig;
     await new Promise((resolve) => server.close(resolve));
   }
 });

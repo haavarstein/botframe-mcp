@@ -3,7 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { authenticateAgent, sourceTokensFromFile } from './agent-tokens.mjs';
+import { authenticateAgent, loadSourceTokens } from './agent-tokens.mjs';
 import { AlertBoard, isAlertId, parseAlert, prepareAlert, quietHoursConfig, urgentSourcesFromEnv } from './alerts.mjs';
 import { assertPosixMode600, clientKey, jsonPostAllowed, RateLimiter, tokenMatches } from './guard.mjs';
 import { handleMcp } from './mcp.mjs';
@@ -64,12 +64,36 @@ function bindRequestSource(req, res, raw, field) {
   return raw;
 }
 
+export const TOKENS_FILE_ERROR = 'agent tokens file is missing, malformed, or has no valid entries';
+
+export function isLoopbackHost(host) {
+  const value = String(host == null ? '' : host).trim().toLowerCase();
+  if (value === 'localhost' || value === '::1' || value === '[::1]') return true;
+  const octets = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+  if (!octets) return false;
+  return octets.slice(1).every((part) => Number(part) <= 255);
+}
+
+function tokensFileMustBeValid(tokensFile, configured) {
+  if (configured && tokensFile) return true;
+  return Boolean(tokensFile && fs.existsSync(tokensFile));
+}
+
 export function validateStartup(options) {
   const tokensFile = options.tokensFile || '';
   const envFile = options.envFile || '';
   if (tokensFile && fs.existsSync(tokensFile)) assertPosixMode600(tokensFile);
   if (envFile && fs.existsSync(envFile)) assertPosixMode600(envFile);
-  const sourceTokens = options.sourceTokens || sourceTokensFromFile(tokensFile);
+  const required = tokensFileMustBeValid(tokensFile, options.tokensFileConfigured === true);
+  let sourceTokens;
+  if (options.sourceTokens) {
+    sourceTokens = options.sourceTokens;
+  } else {
+    const loaded = loadSourceTokens(tokensFile);
+    if (required && !loaded.ok) throw new Error(TOKENS_FILE_ERROR);
+    sourceTokens = loaded.tokens;
+  }
+  if (required && !Object.keys(sourceTokens).length) throw new Error(TOKENS_FILE_ERROR);
   const legacyToken = options.legacyToken || '';
   if (legacyToken && Object.keys(sourceTokens).length) {
     throw new Error('legacy token cannot be set together with per-source token hashes');
@@ -89,21 +113,34 @@ export function createServer(options) {
   const dismissLimit = options.dismissLimit || new RateLimiter({ max: DISMISS_MAX, windowMs: RATE_MS, now });
   const eventLimit = options.eventLimit || new RateLimiter({ max: MCP_MAX, windowMs: RATE_MS, now });
 
-  function currentSourceTokens() {
-    if (options.tokensFile) return sourceTokensFromFile(options.tokensFile);
-    return options.sourceTokens || {};
-  }
+  const startFile = options.tokensFile || '';
+  const fileRequiredAtStart = !!startFile && tokensFileMustBeValid(startFile, options.tokensFileConfigured === true);
 
-  function currentLegacyToken() {
-    const hashes = currentSourceTokens();
-    if (Object.keys(hashes).length) return '';
-    return options.token || '';
+  function loadAgentAuth() {
+    const file = options.tokensFile || '';
+    const configured = options.tokensFileConfigured === true;
+    if (file && (fileRequiredAtStart || tokensFileMustBeValid(file, configured))) {
+      const loaded = loadSourceTokens(file);
+      if (!loaded.ok) return { broken: true, sourceTokens: {}, legacyToken: '' };
+      return { broken: false, sourceTokens: loaded.tokens, legacyToken: '' };
+    }
+    const sourceTokens = options.sourceTokens || {};
+    if (Object.keys(sourceTokens).length) {
+      return { broken: false, sourceTokens, legacyToken: '' };
+    }
+    return { broken: false, sourceTokens: {}, legacyToken: options.token || '' };
   }
 
   function agentTokenOk(req, res) {
+    const auth = loadAgentAuth();
+    if (auth.broken) {
+      console.error(TOKENS_FILE_ERROR + '; refusing agent auth');
+      sendJson(res, 401, { error: 'token' });
+      return false;
+    }
     const result = authenticateAgent(req.headers.authorization, {
-      legacyToken: currentLegacyToken(),
-      sourceTokens: currentSourceTokens(),
+      legacyToken: auth.legacyToken,
+      sourceTokens: auth.sourceTokens,
     });
     if (!result.ok) {
       if (result.status === 404) {
@@ -302,12 +339,17 @@ export async function listen(options = {}) {
   const cwd = options.cwd || process.cwd();
   const envFile = options.envFile !== undefined ? options.envFile : path.join(cwd, '.env');
   if (envFile) loadEnvFile(envFile);
+  const envTokensFile = process.env.AGENT_SOURCE_TOKENS_FILE || '';
   const tokensFile = options.tokensFile !== undefined
     ? options.tokensFile
-    : (process.env.AGENT_SOURCE_TOKENS_FILE || path.join(cwd, 'config', 'agent-tokens.json'));
+    : (envTokensFile || path.join(cwd, 'config', 'agent-tokens.json'));
+  const tokensFileConfigured = options.tokensFile !== undefined
+    ? Boolean(options.tokensFile)
+    : Boolean(envTokensFile);
   const legacyToken = options.token ?? process.env.AGENT_EVENTS_TOKEN ?? '';
   const checked = validateStartup({
     tokensFile,
+    tokensFileConfigured,
     envFile,
     legacyToken,
     sourceTokens: options.sourceTokens,
@@ -327,6 +369,7 @@ export async function listen(options = {}) {
     frameToken,
     sourceTokens: checked.sourceTokens,
     tokensFile,
+    tokensFileConfigured,
     alerts,
     agentWall,
     now,
@@ -339,7 +382,12 @@ export async function listen(options = {}) {
   });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, host, () => resolve(server));
+    server.listen(port, host, () => {
+      if (!isLoopbackHost(host)) {
+        console.warn('FRAME_HOST is not loopback; the server is reachable beyond this machine');
+      }
+      resolve(server);
+    });
   });
 }
 

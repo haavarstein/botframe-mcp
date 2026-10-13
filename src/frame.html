@@ -63,7 +63,13 @@
     const panel = document.getElementById('panel');
     const status = document.getElementById('status');
     const clock = document.getElementById('clock');
-    const token = new URLSearchParams(location.search).get('token') || '';
+    const params = new URLSearchParams(location.search);
+    const token = params.get('token') || '';
+    if (params.has('token')) {
+      params.delete('token');
+      const query = params.toString();
+      history.replaceState(null, '', location.pathname + (query ? '?' + query : '') + location.hash);
+    }
     let current = null;
 
     function tick() {

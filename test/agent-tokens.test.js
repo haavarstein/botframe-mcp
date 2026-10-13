@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { authenticateAgent, hashToken, hashesEqual, sourceTokensFromFile } from '../src/agent-tokens.mjs';
+import { authenticateAgent, hashToken, hashesEqual, loadSourceTokens, sourceTokensFromFile } from '../src/agent-tokens.mjs';
 
 const TOKEN = 'a'.repeat(32);
 const OTHER = 'b'.repeat(32);
@@ -56,4 +56,24 @@ test('source token file keeps only valid hashes', () => {
   assert.equal(hashesEqual('aa', map.ops), false);
   assert.equal(hashesEqual(hashToken(OTHER), map.ops), false);
   assert.equal(createHash('sha256').update(TOKEN).digest('hex'), hashToken(TOKEN));
+});
+
+test('loadSourceTokens fails closed on missing, malformed, or empty files', () => {
+  assert.equal(loadSourceTokens('').ok, false);
+  assert.equal(loadSourceTokens('').reason, 'missing');
+  const missing = tmpFile('gone.json') + '.missing';
+  assert.equal(loadSourceTokens(missing).ok, false);
+  assert.equal(loadSourceTokens(missing).reason, 'missing');
+  const malformed = tmpFile('bad.json', '{');
+  assert.equal(loadSourceTokens(malformed).ok, false);
+  assert.equal(loadSourceTokens(malformed).reason, 'malformed');
+  const empty = tmpFile('empty.json', '{}');
+  assert.equal(loadSourceTokens(empty).ok, false);
+  assert.equal(loadSourceTokens(empty).reason, 'empty');
+  const noneValid = tmpFile('none.json', JSON.stringify({ 'Bad Source': hashToken(TOKEN), daily: 'not-a-hash' }));
+  assert.equal(loadSourceTokens(noneValid).ok, false);
+  assert.equal(loadSourceTokens(noneValid).reason, 'empty');
+  const ok = tmpFile('ok.json', JSON.stringify({ ops: hashToken(TOKEN) }));
+  assert.equal(loadSourceTokens(ok).ok, true);
+  assert.equal(loadSourceTokens(ok).tokens.ops, hashToken(TOKEN));
 });

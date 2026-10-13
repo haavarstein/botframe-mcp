@@ -32,7 +32,7 @@ Then:
 npm start
 ```
 
-Open `http://127.0.0.1:8090/?token=<FRAME_TOKEN>` on the frame. The page checks `/api/alerts` every 10 seconds. A tap removes the alert.
+Open `http://127.0.0.1:8090/?token=<FRAME_TOKEN>` on the frame. The page reads the token once, keeps it in memory, and removes it from the address bar. It checks `/api/alerts` every 10 seconds. A tap removes the alert.
 
 The server listens on `127.0.0.1` until you set `FRAME_HOST`. Leave agent tokens empty and `POST /mcp` answers 404, so nothing can post.
 
@@ -108,7 +108,7 @@ Or use the helper:
 FRAME_URL=http://127.0.0.1:8090 FRAME_AGENT_TOKEN=... node scripts/frame-notify.mjs failed coder "CI red on main"
 ```
 
-Each source can send 30 alerts a minute. Write endpoints also have a per-address cap. The extra request gets `429`.
+Each source can send 30 alerts a minute. Write endpoints also have a per-address cap. The extra request gets `429`. Behind a tunnel every client appears as `127.0.0.1`, so those per-address limits act as one shared limit.
 
 ## Policy
 
@@ -133,3 +133,5 @@ Inspired by Wes Bos's [photo-frame-dashboard](https://github.com/wesbos/photo-fr
 ## Disclaimer
 
 Provided "as is", without warranty of any kind (see LICENSE). Not affiliated with or endorsed by Wes Bos, botframe.dev, or any bot or AI vendor. You are responsible for securing your deployment, tokens, and any alert data routed through it.
+
+Note: the frame keeps its `?token=` only in memory and strips it from the URL, so after a page reload the frame must be reopened with the `?token=` URL.

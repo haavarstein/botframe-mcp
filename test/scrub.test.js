@@ -17,6 +17,23 @@ function walk(dir, out) {
   return out;
 }
 
+test('source does not log request URLs or query strings', () => {
+  const files = walk(path.join(ROOT, 'src'), []).concat(walk(path.join(ROOT, 'scripts'), []));
+  const hits = [];
+  for (const file of files) {
+    const rel = path.relative(ROOT, file);
+    const lines = fs.readFileSync(file, 'utf8').split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!/\bconsole\.(log|info|warn|error|debug)\b/.test(line)) continue;
+      if (/\breq\.url\b|\burl\.(search|href|pathname)\b|\blocation\.search\b|\bsearchParams\b/.test(line)) {
+        hits.push(rel + ':' + (i + 1));
+      }
+    }
+  }
+  assert.deepEqual(hits, []);
+});
+
 test('the tree has no personal names, private IPs, or vendor hosts', () => {
   const files = walk(ROOT, []);
   const hits = [];
