@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alert frame</title>
+  <style>
+    :root {
+      --ink: #0e1714;
+      --paper: #e7efe8;
+      --mute: #8aa394;
+      --line: #24352e;
+      --nudge: #d9a441;
+      --urgent: #e35d4f;
+      --whisper: #6fbfa3;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--ink); color: var(--paper); font: 20px/1.35 "Segoe UI", system-ui, sans-serif; }
+    body { display: grid; grid-template-rows: auto 1fr auto; }
+    header { display: flex; justify-content: space-between; align-items: baseline; padding: 18px 22px 0; letter-spacing: 0.14em; text-transform: uppercase; font-size: 12px; color: var(--mute); }
+    #clock { font-variant-numeric: tabular-nums; letter-spacing: 0.08em; }
+    main { position: relative; }
+    #idle { position: absolute; inset: 0; display: grid; place-items: center; color: var(--mute); letter-spacing: 0.18em; text-transform: uppercase; font-size: 13px; }
+    #idle.off { display: none; }
+    #banner { display: none; position: absolute; top: 12px; left: 22px; right: 22px; padding: 10px 14px; border-left: 4px solid var(--whisper); background: #16241f; }
+    #banner.on { display: block; }
+    #banner p { margin: 0; font-size: 18px; }
+    #panel { display: none; position: absolute; inset: 48px 28px 28px; padding: 28px 32px; border: 1px solid var(--line); background: #13201b; }
+    #panel.on { display: block; }
+    #panel.nudge { border-color: var(--nudge); }
+    #panel.urgent { border-color: var(--urgent); box-shadow: inset 0 0 0 6px var(--urgent); }
+    #panel.urgent.silent { box-shadow: none; }
+    #panel .meta { display: flex; gap: 10px; align-items: center; margin: 0 0 12px; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--mute); }
+    #panel .meta b { color: var(--nudge); font-weight: 600; }
+    #panel.urgent .meta b { color: var(--urgent); }
+    #panel h1 { margin: 0; font-size: clamp(28px, 4vw, 48px); font-weight: 600; }
+    #panel .remain { margin-top: 18px; font-size: 13px; color: var(--mute); }
+    footer { padding: 0 22px 16px; color: var(--mute); font-size: 13px; }
+    #status { display: flex; gap: 16px; flex-wrap: wrap; min-height: 1.2em; }
+    #status .stale { color: var(--nudge); }
+  </style>
+</head>
+<body>
+  <header>
+    <span>Alert frame</span>
+    <span id="clock"></span>
+  </header>
+  <main>
+    <div id="idle">Quiet</div>
+    <div id="banner"><p></p></div>
+    <div id="panel">
+      <p class="meta"><b></b><span></span></p>
+      <h1></h1>
+      <p class="remain"></p>
+    </div>
+  </main>
+  <footer>
+    <div id="status"></div>
+  </footer>
+  <script>
+    const idle = document.getElementById('idle');
+    const banner = document.getElementById('banner');
+    const panel = document.getElementById('panel');
+    const status = document.getElementById('status');
+    const clock = document.getElementById('clock');
+    const token = new URLSearchParams(location.search).get('token') || '';
+    let current = null;
+
+    function tick() {
+      const d = new Date();
+      clock.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function remain(ms) {
+      if (ms == null) return 'Stays until dismissed';
+      const s = Math.max(0, Math.round(ms / 1000));
+      if (s >= 60) return Math.round(s / 60) + ' min left';
+      return s + ' s left';
+    }
+
+    function paint(alerts) {
+      const byLevel = {};
+      for (const alert of alerts || []) if (!byLevel[alert.level]) byLevel[alert.level] = alert;
+      const top = byLevel.urgent || byLevel.nudge || null;
+      const quiet = byLevel.whisper || null;
+      if (top) {
+        panel.className = 'on ' + top.level + (top.silent ? ' silent' : '');
+        panel.querySelector('b').textContent = top.level;
+        panel.querySelector('span').textContent = top.source || '';
+        panel.querySelector('h1').textContent = top.text;
+        panel.querySelector('.remain').textContent = remain(top.remainingMs);
+        current = top.id;
+        idle.className = 'off';
+        banner.className = '';
+      } else if (quiet) {
+        panel.className = '';
+        banner.className = 'on';
+        banner.querySelector('p').textContent = quiet.text;
+        current = quiet.id;
+        idle.className = 'off';
+      } else {
+        panel.className = '';
+        banner.className = '';
+        idle.className = '';
+        current = null;
+      }
+    }
+
+    function paintStatus(body) {
+      const bits = [];
+      for (const row of (body && body.needs) || []) bits.push(row.agent + ' needs you');
+      for (const row of (body && body.working) || []) bits.push((row.stale ? 'stale · ' : '') + row.agent);
+      status.innerHTML = bits.map((line) => '<span' + (line.indexOf('stale') === 0 ? ' class="stale"' : '') + '>' + line + '</span>').join('');
+    }
+
+    async function poll() {
+      try {
+        const body = await fetch('/api/alerts', { cache: 'no-store' }).then((res) => res.json());
+        paint(body.alerts);
+      } catch (err) { /* keep the last paint */ }
+      try {
+        const wall = await fetch('/api/agents/wall', { cache: 'no-store' }).then((res) => res.json());
+        paintStatus(wall);
+      } catch (err) { /* optional strip */ }
+    }
+
+    async function dismiss() {
+      if (!current) return;
+      const id = current;
+      current = null;
+      panel.className = '';
+      banner.className = '';
+      idle.className = '';
+      const headers = { 'content-type': 'application/json' };
+      if (token) headers.authorization = 'Bearer ' + token;
+      await fetch('/api/alerts/dismiss', { method: 'POST', headers, body: JSON.stringify({ id }) });
+    }
+
+    panel.addEventListener('click', dismiss);
+    banner.addEventListener('click', dismiss);
+    tick();
+    poll();
+    setInterval(tick, 1000);
+    setInterval(poll, 10000);
+  </script>
+</body>
+</html>

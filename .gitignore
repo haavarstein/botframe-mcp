@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+data/
+config/agent-tokens.json
+agent-tokens.json
+*.tmp
+coverage/
+.DS_Store

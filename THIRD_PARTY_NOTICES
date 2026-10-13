@@ -1,0 +1,10 @@
+Third-party notices for botframe-mcp
+
+Generated with: npx license-checker --production --summary
+
+└─ UNLICENSED: 1
+
+botframe-mcp has 0 runtime (production) dependencies. The single
+UNLICENSED entry above is this package itself (marked "private" in
+package.json; it is licensed MIT, see LICENSE). No third-party code is
+bundled. No GPL or AGPL licenses are present.
